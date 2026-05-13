@@ -1,28 +1,47 @@
 # Mode: dashboard — Browser Dashboard for Evaluated Jobs
 
-Render a single-file HTML dashboard of every evaluated job so the user can scan, filter, and click "Apply" without opening report markdown files individually.
+Render a visual dashboard of every evaluated job so the user can scan, filter, click Apply, and track applications without reading report markdown files individually.
+
+Two modes:
+- **Static** — generate a single HTML file, open in browser. Apply button just opens the JD URL.
+- **Server (interactive)** — run a local Node server. Apply button marks job as Applied, copies your CV to a company-named PDF, switches the card into the Applied tab. Recommended.
 
 ## When to use
 
 - The user wants a visual view of evaluated jobs ("show me the jobs", "where can I see these", "I can't read markdown files").
 - After running `scan` + `pipeline` to evaluate a batch — close with a dashboard refresh so the user has somewhere to act on the results.
-- Whenever a new report is added to `reports/`, offer to regenerate.
+- Whenever the user wants to apply to a job and needs the PDF generated + status tracked.
 
-For terminal users, the Go TUI (`./dashboard/career-dashboard`) is the alternative. The HTML dashboard is friendlier for non-CLI users and supports clickable apply links.
+For terminal users, the Go TUI (`./dashboard/career-dashboard`) is the alternative.
 
-## Run
+## Server mode (interactive — recommended)
+
+```bash
+node dashboard-server.mjs
+# or
+npm run dashboard:serve
+```
+
+Listens on `http://localhost:3030` (override with `PORT=4000`). Open in your browser.
+
+**What the Apply button does:**
+1. POSTs to `/apply/:id`
+2. Server marks the report's `Status: Applied`, adds `Applied: {date}`
+3. Server updates the corresponding row in `data/applications.md`
+4. Server copies the latest generic CV PDF to `output/cv-rob-rose-{company-slug}-{date}.pdf`
+5. Server returns `{ ok, pdfPath, appliedDate }`
+6. Client opens the JD URL in a new tab AND reloads the dashboard so the card moves to the Applied tab with a "📄 View tailored CV" link
+
+**JD-tailored PDFs:** The Apply button creates a *placeholder* (a copy of your generic CV with a company-named filename). For a real JD-tailored CV — keyword injection, archetype-adapted summary, bullet reordering — ask Claude in chat: "tailor the PDF for #16". Claude rewrites the file in place; the next dashboard load picks up the change.
+
+## Static mode
 
 ```bash
 node generate-dashboard.mjs [output.html]
-# or
 npm run dashboard -- [output.html]
 ```
 
-Default output: `output/dashboard.html`. After generating, suggest opening:
-
-```bash
-open output/dashboard.html
-```
+Default output: `output/dashboard.html`. Apply button just opens the JD URL — no state changes, no PDF copy.
 
 ## What it does
 
@@ -47,6 +66,7 @@ open output/dashboard.html
 
 | Tier | Score range | Notes |
 |------|-------------|-------|
+| ✉️ Applied | Any with `Status: Applied` / Interview / Offer | Hidden from Actionable; own tab |
 | 🏆 Top | ≥ 4.5 | Apply first |
 | 🟢 Strong | 4.0 - 4.4 | Apply if energy + comp align |
 | 🟡 Maybe | 3.5 - 3.9 | Worth a second look, often comp- or location-blocked otherwise |

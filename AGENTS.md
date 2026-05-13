@@ -59,6 +59,7 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `generate-pdf.mjs` | Playwright: HTML to PDF |
 | `generate-docx.mjs` | Markdown CV to ATS-friendly .docx (Word) |
 | `generate-dashboard.mjs` | Browser dashboard for evaluated jobs (HTML cards with apply buttons) |
+| `dashboard-server.mjs` | Interactive dashboard server: Apply button marks job as Applied + copies CV to a company-named PDF |
 | `generate-latex.mjs` | LaTeX CV validator + pdflatex compiler |
 | `article-digest.md` | Compact proof points from portfolio (optional) |
 | `interview-prep/story-bank.md` | Accumulated STAR+R stories across evaluations |

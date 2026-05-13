@@ -62,6 +62,7 @@ function parseReport(filename, content) {
     scoreNum: parseFloat((m(/^\*\*Score:\*\*\s*([\d.]+)\/5/m)) || '0'),
     status: m(/^\*\*Status:\*\*\s*(.+)/m),
     date: m(/^\*\*Date:\*\*\s*(.+)/m),
+    applied: m(/^\*\*Applied:\*\*\s*(.+)/m),
     legitimacy: m(/^\*\*Legitimacy:\*\*\s*(.+)/m),
     tldr: pipe('TL;DR'),
     archetype: pipe('Arquetipo') || pipe('Archetype'),
@@ -72,7 +73,9 @@ function parseReport(filename, content) {
 }
 
 function scoreTier(scoreNum, status) {
-  if (status && status.toUpperCase().includes('SKIP')) return 'skip';
+  const s = (status || '').toLowerCase();
+  if (s.includes('applied') || s.includes('interview') || s.includes('offer')) return 'applied';
+  if (s.includes('skip')) return 'skip';
   if (scoreNum >= 4.5) return 'top';
   if (scoreNum >= 4.0) return 'strong';
   if (scoreNum >= 3.5) return 'maybe';
@@ -81,6 +84,7 @@ function scoreTier(scoreNum, status) {
 
 function tierLabel(tier) {
   return {
+    applied: '✉️ Applied',
     top: '🏆 Top fit',
     strong: '🟢 Strong fit',
     maybe: '🟡 Maybe',
@@ -125,6 +129,21 @@ function buildHTML(reports) {
     const status = statusBadge(r.status);
     const company = (r.title.split('—')[0] || r.title).trim();
     const role = (r.title.split('—').slice(1).join('—') || '').trim();
+    const isApplied = tier === 'applied';
+    const slug = (r.file.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/) || [])[1] || 'unknown';
+    const pdfHref = `output/cv-rob-rose-${slug}-${r.applied || ''}.pdf`;
+
+    // Apply button: server-mode uses fetch, static-mode is a plain link
+    const applyBtn = isApplied
+      ? `<a class="btn applied-pdf" href="${pdfHref}" target="_blank">📄 View tailored CV</a>`
+      : (r.url
+          ? `<a class="btn primary" href="${esc(r.url)}" target="_blank" rel="noopener" data-apply-id="${r.id}" onclick="if(window.CAREER_OPS_SERVER){event.preventDefault();window.applyToJob('${r.id}', '${esc(r.url)}');}">Apply →</a>`
+          : '');
+
+    const reapplyBtn = isApplied && r.url
+      ? `<a class="btn secondary" href="${esc(r.url)}" target="_blank" rel="noopener">Reopen JD</a>`
+      : '';
+
     return `
     <article class="card" data-tier="${tier}" data-status="${status}">
       <header class="card-header">
@@ -145,11 +164,13 @@ function buildHTML(reports) {
         ${r.remote ? `<div><dt>Remote</dt><dd>${esc(r.remote)}</dd></div>` : ''}
         ${r.comp ? `<div><dt>Comp</dt><dd>${esc(r.comp)}</dd></div>` : ''}
         ${r.status ? `<div><dt>Status</dt><dd class="status-${status}">${esc(r.status)}</dd></div>` : ''}
+        ${r.applied ? `<div><dt>Applied</dt><dd>${esc(r.applied)}</dd></div>` : ''}
         ${r.legitimacy ? `<div><dt>Legitimacy</dt><dd>${esc(r.legitimacy)}</dd></div>` : ''}
       </dl>
 
       <footer class="card-actions">
-        ${r.url ? `<a class="btn primary" href="${esc(r.url)}" target="_blank" rel="noopener">Apply →</a>` : ''}
+        ${applyBtn}
+        ${reapplyBtn}
         <button class="btn secondary" onclick="toggleDetails('details-${r.id}')">View details</button>
       </footer>
 
@@ -160,6 +181,7 @@ function buildHTML(reports) {
   }).join('\n');
 
   const counts = {
+    applied: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'applied').length,
     top: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'top').length,
     strong: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'strong').length,
     maybe: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'maybe').length,
@@ -285,6 +307,12 @@ function buildHTML(reports) {
   .tier-maybe  .score-badge, .score-badge.tier-maybe  { background: var(--maybe); }
   .tier-weak   .score-badge, .score-badge.tier-weak   { background: var(--weak); }
   .tier-skip   .score-badge, .score-badge.tier-skip   { background: var(--skip); }
+  .tier-applied .score-badge, .score-badge.tier-applied { background: var(--purple); }
+  .btn.applied-pdf {
+    background: var(--purple);
+    color: white;
+  }
+  .btn.applied-pdf:hover { background: hsl(270, 70%, 40%); }
   .tier-label {
     display: block;
     font-size: 11px;
@@ -366,9 +394,10 @@ function buildHTML(reports) {
 
 <header class="page">
   <h1>Career-Ops Dashboard</h1>
-  <div class="subtitle">${actionable} actionable · ${counts.skip} skipped · generated ${new Date().toISOString().slice(0,10)}</div>
+  <div class="subtitle">${actionable} actionable · ${counts.applied} applied · ${counts.skip} skipped · generated ${new Date().toISOString().slice(0,10)}</div>
   <div class="filters">
     <button class="active" onclick="filterCards('actionable', this)">Actionable (${actionable})</button>
+    <button onclick="filterCards('applied', this)">✉️ Applied (${counts.applied})</button>
     <button onclick="filterCards('top', this)">🏆 Top (${counts.top})</button>
     <button onclick="filterCards('strong', this)">🟢 Strong (${counts.strong})</button>
     <button onclick="filterCards('maybe', this)">🟡 Maybe (${counts.maybe})</button>
@@ -394,13 +423,13 @@ ${cards || '<p class="empty">No evaluations yet. Run <code>node scan.mjs</code> 
     document.querySelectorAll('.card').forEach(card => {
       let show;
       if (tier === 'all') show = true;
-      else if (tier === 'actionable') show = card.dataset.tier !== 'skip';
+      else if (tier === 'actionable') show = card.dataset.tier !== 'skip' && card.dataset.tier !== 'applied';
       else show = card.dataset.tier === tier;
       card.style.display = show ? '' : 'none';
     });
   }
-  // Hide SKIP cards on initial load (default view is "Actionable")
-  document.querySelectorAll('.card[data-tier="skip"]').forEach(c => c.style.display = 'none');
+  // Default view is "Actionable" - hide SKIP and Applied cards on initial load
+  document.querySelectorAll('.card[data-tier="skip"], .card[data-tier="applied"]').forEach(c => c.style.display = 'none');
 </script>
 
 </body>

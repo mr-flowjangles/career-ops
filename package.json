@@ -10,6 +10,7 @@
     "merge": "node merge-tracker.mjs",
     "pdf": "node generate-pdf.mjs",
     "docx": "node generate-docx.mjs",
+    "dashboard": "node generate-dashboard.mjs",
     "sync-check": "node cv-sync-check.mjs",
     "update:check": "node update-system.mjs check",
     "update": "node update-system.mjs apply",

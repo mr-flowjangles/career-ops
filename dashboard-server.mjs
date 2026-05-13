@@ -99,8 +99,14 @@ async function updateReportStatus(reportPath, status, appliedDate) {
   if (appliedDate && !/^\*\*Applied:\*\*/m.test(content)) {
     content = content.replace(/^\*\*Status:\*\* Applied$/m, `**Status:** Applied\n**Applied:** ${appliedDate}`);
   }
-  if (status !== 'Applied') {
-    // Remove the Applied date line if reverting
+  if (status === 'Evaluated') {
+    // Reverting all the way back: scrub Applied / Rejected / Rejection Note
+    content = content.replace(/^\*\*Applied:\*\*[^\n]*\n/m, '');
+    content = content.replace(/^\*\*Rejected:\*\*[^\n]*\n/m, '');
+    content = content.replace(/^\*\*Rejection Note:\*\*[^\n]*\n/m, '');
+  } else if (status === 'Rejected') {
+    // Keep Applied (history), Rejected/Note are set by rejectJob
+  } else if (status !== 'Applied') {
     content = content.replace(/^\*\*Applied:\*\*[^\n]*\n/m, '');
   }
   await writeFile(reportPath, content);
@@ -189,6 +195,40 @@ async function applyToJob(id) {
   };
 }
 
+async function rejectJob(id, reason) {
+  const report = await findReportPath(id);
+  if (!report) throw new Error(`Report not found for id ${id}`);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const note = (reason || '').replace(/\r?\n+/g, ' ').trim();
+
+  let content = await readFile(report.path, 'utf-8');
+  // Status -> Rejected
+  content = content.replace(/^\*\*Status:\*\*[^\n]*$/m, '**Status:** Rejected');
+  // Add or update Rejected: date
+  if (/^\*\*Rejected:\*\*/m.test(content)) {
+    content = content.replace(/^\*\*Rejected:\*\*[^\n]*$/m, `**Rejected:** ${date}`);
+  } else {
+    content = content.replace(/^\*\*Status:\*\* Rejected$/m, `**Status:** Rejected\n**Rejected:** ${date}`);
+  }
+  // Add or update Rejection Note: text
+  if (note) {
+    if (/^\*\*Rejection Note:\*\*/m.test(content)) {
+      content = content.replace(/^\*\*Rejection Note:\*\*[^\n]*$/m, `**Rejection Note:** ${note}`);
+    } else {
+      content = content.replace(/^\*\*Rejected:\*\* [^\n]*$/m, (m) => `${m}\n**Rejection Note:** ${note}`);
+    }
+  } else {
+    // Remove existing note if user marked rejected with no reason
+    content = content.replace(/^\*\*Rejection Note:\*\*[^\n]*\n/m, '');
+  }
+  await writeFile(report.path, content);
+
+  await updateApplicationsRow(id, 'Rejected');
+
+  return { ok: true, id, status: 'Rejected', date, reason: note };
+}
+
 async function unapplyJob(id) {
   const report = await findReportPath(id);
   if (!report) throw new Error(`Report not found for id ${id}`);
@@ -265,6 +305,22 @@ const server = http.createServer(async (req, res) => {
       if (btn) { btn.disabled = false; btn.textContent = '📄 Generate Resume'; }
     }
   };
+  window.rejectJob = async function(id) {
+    const reason = prompt('Why was this rejected? (optional — leave blank if you don\\'t want to record a reason)');
+    if (reason === null) return;
+    try {
+      const resp = await fetch('/reject/' + id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || '' })
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'Reject failed');
+      setTimeout(() => location.reload(), 200);
+    } catch (err) {
+      alert('Mark Rejected failed: ' + err.message);
+    }
+  };
 </script>`;
       html = html.replace('</body>', inject + '</body>');
       res.writeHead(200, { 'Content-Type': MIME['.html'] });
@@ -294,6 +350,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/generate-pdf/')) {
       const id = url.pathname.split('/').pop();
       const result = await generatePdfForJob(id);
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /reject/:id — body: { reason }
+    if (req.method === 'POST' && url.pathname.startsWith('/reject/')) {
+      const id = url.pathname.split('/').pop();
+      let body = '';
+      await new Promise((res2, rej2) => {
+        req.on('data', chunk => body += chunk);
+        req.on('end', res2);
+        req.on('error', rej2);
+      });
+      let reason = '';
+      try { reason = (JSON.parse(body || '{}').reason || '').toString(); } catch {}
+      const result = await rejectJob(id, reason);
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;

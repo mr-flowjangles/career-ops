@@ -63,6 +63,8 @@ function parseReport(filename, content) {
     status: m(/^\*\*Status:\*\*\s*(.+)/m),
     date: m(/^\*\*Date:\*\*\s*(.+)/m),
     applied: m(/^\*\*Applied:\*\*\s*(.+)/m),
+    rejected: m(/^\*\*Rejected:\*\*\s*(.+)/m),
+    rejectionNote: m(/^\*\*Rejection Note:\*\*\s*(.+)/m),
     legitimacy: m(/^\*\*Legitimacy:\*\*\s*(.+)/m),
     tldr: pipe('TL;DR'),
     archetype: pipe('Arquetipo') || pipe('Archetype'),
@@ -74,7 +76,10 @@ function parseReport(filename, content) {
 
 function scoreTier(scoreNum, status) {
   const s = (status || '').toLowerCase();
-  if (s.includes('applied') || s.includes('interview') || s.includes('offer')) return 'applied';
+  if (s.includes('rejected')) return 'rejected';
+  if (s.includes('offer')) return 'applied';
+  if (s.includes('interview')) return 'applied';
+  if (s.includes('applied')) return 'applied';
   if (s.includes('skip')) return 'skip';
   if (scoreNum >= 4.5) return 'top';
   if (scoreNum >= 4.0) return 'strong';
@@ -85,6 +90,7 @@ function scoreTier(scoreNum, status) {
 function tierLabel(tier) {
   return {
     applied: '✉️ Applied',
+    rejected: '❌ Rejected',
     top: '🏆 Top fit',
     strong: '🟢 Strong fit',
     maybe: '🟡 Maybe',
@@ -149,13 +155,14 @@ function buildHTML(reports) {
     const company = (r.title.split('—')[0] || r.title).trim();
     const role = (r.title.split('—').slice(1).join('—') || '').trim();
     const isApplied = tier === 'applied';
+    const isRejected = tier === 'rejected';
     const slug = (r.file.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/) || [])[1] || 'unknown';
     const hasPdf = !!r.pdfFile;
     const pdfHref = r.pdfFile ? `output/${r.pdfFile}` : '';
 
     // Apply button: server-mode uses fetch, static-mode is a plain link
-    const applyBtn = isApplied
-      ? '' // Applied cards get View Resume + Open JD instead
+    const applyBtn = (isApplied || isRejected)
+      ? '' // these cards get View Resume + Open JD instead
       : (r.url
           ? `<a class="btn primary" href="${esc(r.url)}" target="_blank" rel="noopener" data-apply-id="${r.id}" onclick="if(window.CAREER_OPS_SERVER){event.preventDefault();window.applyToJob('${r.id}', '${esc(r.url)}');}">Apply →</a>`
           : '');
@@ -165,16 +172,26 @@ function buildHTML(reports) {
       ? `<a class="btn applied-pdf" href="${pdfHref}" target="_blank">📄 View Resume</a>`
       : `<button class="btn secondary" onclick="if(window.CAREER_OPS_SERVER){window.generateResume('${r.id}', this);}else{alert('Generate Resume requires the dashboard server. Run: npm run dashboard:serve');}">📄 Generate Resume</button>`;
 
-    const reapplyBtn = isApplied && r.url
+    const reapplyBtn = (isApplied || isRejected) && r.url
       ? `<a class="btn secondary" href="${esc(r.url)}" target="_blank" rel="noopener">Open JD</a>`
       : '';
 
-    const undoBtn = isApplied
-      ? `<button class="btn undo" onclick="if(window.CAREER_OPS_SERVER){window.unapplyJob('${r.id}');}else{alert('Undo requires the dashboard server. Run: npm run dashboard:serve');}">Undo apply</button>`
+    const rejectBtn = isApplied
+      ? `<button class="btn reject" onclick="if(window.CAREER_OPS_SERVER){window.rejectJob('${r.id}');}else{alert('Mark Rejected requires the dashboard server. Run: npm run dashboard:serve');}">❌ Mark Rejected</button>`
+      : '';
+
+    const undoBtn = (isApplied || isRejected)
+      ? `<button class="btn undo" onclick="if(window.CAREER_OPS_SERVER){window.unapplyJob('${r.id}');}else{alert('Undo requires the dashboard server. Run: npm run dashboard:serve');}">${isRejected ? 'Undo' : 'Undo apply'}</button>`
       : '';
 
     const banner = isApplied
       ? `<div class="applied-banner">✉️ Applied${r.applied ? `<span class="applied-date">${esc(r.applied)}</span>` : ''}</div>`
+      : (isRejected
+          ? `<div class="rejected-banner">❌ Rejected${r.rejected ? `<span class="rejected-date">${esc(r.rejected)}</span>` : ''}</div>`
+          : '');
+
+    const rejectionNoteBlock = isRejected && r.rejectionNote
+      ? `<div class="rejection-note"><strong>Why:</strong>${esc(r.rejectionNote)}</div>`
       : '';
 
     return `
@@ -193,12 +210,15 @@ function buildHTML(reports) {
 
       ${r.tldr ? `<p class="tldr">${esc(r.tldr)}</p>` : ''}
 
+      ${rejectionNoteBlock}
+
       <dl class="meta">
         ${r.archetype ? `<div><dt>Archetype</dt><dd>${esc(r.archetype)}</dd></div>` : ''}
         ${r.remote ? `<div><dt>Remote</dt><dd>${esc(r.remote)}</dd></div>` : ''}
         ${r.comp ? `<div><dt>Comp</dt><dd>${esc(r.comp)}</dd></div>` : ''}
         ${r.status ? `<div><dt>Status</dt><dd class="status-${status}">${esc(r.status)}</dd></div>` : ''}
         ${r.applied ? `<div><dt>Applied</dt><dd>${esc(r.applied)}</dd></div>` : ''}
+        ${r.rejected ? `<div><dt>Rejected</dt><dd>${esc(r.rejected)}</dd></div>` : ''}
         ${r.legitimacy ? `<div><dt>Legitimacy</dt><dd>${esc(r.legitimacy)}</dd></div>` : ''}
       </dl>
 
@@ -207,6 +227,7 @@ function buildHTML(reports) {
         ${resumeBtn}
         ${reapplyBtn}
         <button class="btn secondary" onclick="toggleDetails('details-${r.id}')">View details</button>
+        ${rejectBtn}
         ${undoBtn}
       </footer>
 
@@ -218,6 +239,7 @@ function buildHTML(reports) {
 
   const counts = {
     applied: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'applied').length,
+    rejected: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'rejected').length,
     top: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'top').length,
     strong: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'strong').length,
     maybe: reports.filter(r => scoreTier(r.scoreNum, r.status) === 'maybe').length,
@@ -344,6 +366,7 @@ function buildHTML(reports) {
   .tier-weak   .score-badge, .score-badge.tier-weak   { background: var(--weak); }
   .tier-skip   .score-badge, .score-badge.tier-skip   { background: var(--skip); }
   .tier-applied .score-badge, .score-badge.tier-applied { background: var(--purple); }
+  .tier-rejected .score-badge, .score-badge.tier-rejected { background: hsl(0, 0%, 50%); }
   .btn.applied-pdf {
     background: var(--purple);
     color: white;
@@ -359,6 +382,59 @@ function buildHTML(reports) {
   .btn.undo:hover {
     color: var(--skip);
     border-color: var(--skip);
+  }
+  .btn.reject {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .btn.reject:hover {
+    color: var(--skip);
+    border-color: var(--skip);
+  }
+
+  /* Rejection box shown on rejected cards */
+  .rejected-banner {
+    background: hsl(0, 0%, 35%);
+    color: white;
+    padding: 5px 10px;
+    border-radius: 6px 6px 0 0;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: -18px -18px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .rejected-banner .rejected-date {
+    font-weight: 400;
+    letter-spacing: 0;
+    font-size: 11px;
+    text-transform: none;
+  }
+  .card[data-tier="rejected"] {
+    border: 1.5px solid hsl(0, 0%, 50%);
+    opacity: 0.92;
+  }
+  .rejection-note {
+    background: hsl(0, 0%, 95%);
+    border-left: 3px solid hsl(0, 0%, 50%);
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #555;
+    margin: 8px 0 12px;
+    border-radius: 0 4px 4px 0;
+    font-style: italic;
+  }
+  .rejection-note strong {
+    font-style: normal;
+    font-weight: 600;
+    color: #333;
+    display: block;
+    margin-bottom: 2px;
   }
 
   /* Section header that updates with the active filter */
@@ -484,10 +560,11 @@ function buildHTML(reports) {
 
 <header class="page">
   <h1>Career-Ops Dashboard</h1>
-  <div class="subtitle">${actionable} actionable · ${counts.applied} applied · ${counts.skip} skipped · generated ${new Date().toISOString().slice(0,10)}</div>
+  <div class="subtitle">${actionable} actionable · ${counts.applied} applied · ${counts.rejected} rejected · ${counts.skip} skipped · generated ${new Date().toISOString().slice(0,10)}</div>
   <div class="filters">
     <button class="active" onclick="filterCards('actionable', this)">Actionable (${actionable})</button>
     <button onclick="filterCards('applied', this)">✉️ Applied (${counts.applied})</button>
+    <button onclick="filterCards('rejected', this)">❌ Rejected (${counts.rejected})</button>
     <button onclick="filterCards('top', this)">🏆 Top (${counts.top})</button>
     <button onclick="filterCards('strong', this)">🟢 Strong (${counts.strong})</button>
     <button onclick="filterCards('maybe', this)">🟡 Maybe (${counts.maybe})</button>
@@ -512,6 +589,7 @@ ${cards || '<p class="empty">No evaluations yet. Run <code>node scan.mjs</code> 
   const SECTION_TITLES = {
     actionable: 'Actionable Jobs',
     applied: '✉️ Applied Jobs',
+    rejected: '❌ Rejected',
     top: '🏆 Top Fits',
     strong: '🟢 Strong Fits',
     maybe: '🟡 Maybe',
@@ -526,7 +604,7 @@ ${cards || '<p class="empty">No evaluations yet. Run <code>node scan.mjs</code> 
     document.querySelectorAll('.card').forEach(card => {
       let show;
       if (tier === 'all') show = true;
-      else if (tier === 'actionable') show = card.dataset.tier !== 'skip' && card.dataset.tier !== 'applied';
+      else if (tier === 'actionable') show = !['skip','applied','rejected'].includes(card.dataset.tier);
       else show = card.dataset.tier === tier;
       card.style.display = show ? '' : 'none';
       if (show) visible++;
@@ -536,8 +614,8 @@ ${cards || '<p class="empty">No evaluations yet. Run <code>node scan.mjs</code> 
       heading.innerHTML = (SECTION_TITLES[tier] || tier) + ' <span class="count">' + visible + ' total</span>';
     }
   }
-  // Default view is "Actionable" - hide SKIP and Applied cards on initial load
-  document.querySelectorAll('.card[data-tier="skip"], .card[data-tier="applied"]').forEach(c => c.style.display = 'none');
+  // Default view is "Actionable" - hide SKIP, Applied, Rejected on initial load
+  document.querySelectorAll('.card[data-tier="skip"], .card[data-tier="applied"], .card[data-tier="rejected"]').forEach(c => c.style.display = 'none');
 </script>
 
 </body>

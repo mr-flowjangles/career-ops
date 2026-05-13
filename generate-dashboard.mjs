@@ -141,11 +141,20 @@ function buildHTML(reports) {
           : '');
 
     const reapplyBtn = isApplied && r.url
-      ? `<a class="btn secondary" href="${esc(r.url)}" target="_blank" rel="noopener">Reopen JD</a>`
+      ? `<a class="btn secondary" href="${esc(r.url)}" target="_blank" rel="noopener">Open JD</a>`
+      : '';
+
+    const undoBtn = isApplied
+      ? `<button class="btn undo" onclick="if(window.CAREER_OPS_SERVER){window.unapplyJob('${r.id}');}else{alert('Undo requires the dashboard server. Run: npm run dashboard:serve');}">Undo apply</button>`
+      : '';
+
+    const banner = isApplied
+      ? `<div class="applied-banner">✉️ Applied${r.applied ? `<span class="applied-date">${esc(r.applied)}</span>` : ''}</div>`
       : '';
 
     return `
     <article class="card" data-tier="${tier}" data-status="${status}">
+      ${banner}
       <header class="card-header">
         <div class="card-title">
           <span class="company">${esc(company)}</span>
@@ -172,6 +181,7 @@ function buildHTML(reports) {
         ${applyBtn}
         ${reapplyBtn}
         <button class="btn secondary" onclick="toggleDetails('details-${r.id}')">View details</button>
+        ${undoBtn}
       </footer>
 
       <section id="details-${r.id}" class="details" hidden>
@@ -313,6 +323,60 @@ function buildHTML(reports) {
     color: white;
   }
   .btn.applied-pdf:hover { background: hsl(270, 70%, 40%); }
+  .btn.undo {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    margin-left: auto;
+    font-size: 12px;
+  }
+  .btn.undo:hover {
+    color: var(--skip);
+    border-color: var(--skip);
+  }
+
+  /* Section header that updates with the active filter */
+  .section-heading {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 32px 8px;
+    padding-top: 24px;
+    max-width: 1600px;
+  }
+  .section-heading .count {
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 14px;
+    margin-left: 8px;
+  }
+
+  /* APPLIED banner on cards */
+  .applied-banner {
+    background: var(--purple);
+    color: white;
+    padding: 5px 10px;
+    border-radius: 6px 6px 0 0;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: -18px -18px 14px;
+    text-align: left;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .applied-banner .applied-date {
+    font-weight: 400;
+    letter-spacing: 0;
+    font-size: 11px;
+    text-transform: none;
+  }
+  .card[data-tier="applied"] {
+    border: 1.5px solid var(--purple);
+  }
   .tier-label {
     display: block;
     font-size: 11px;
@@ -407,6 +471,8 @@ function buildHTML(reports) {
   </div>
 </header>
 
+<h2 class="section-heading" id="section-heading">Actionable Jobs <span class="count">${actionable} total</span></h2>
+
 <main id="cards">
 ${cards || '<p class="empty">No evaluations yet. Run <code>node scan.mjs</code> then evaluate jobs from the pipeline.</p>'}
 </main>
@@ -417,16 +483,32 @@ ${cards || '<p class="empty">No evaluations yet. Run <code>node scan.mjs</code> 
     if (!el) return;
     el.hidden = !el.hidden;
   }
+  const SECTION_TITLES = {
+    actionable: 'Actionable Jobs',
+    applied: '✉️ Applied Jobs',
+    top: '🏆 Top Fits',
+    strong: '🟢 Strong Fits',
+    maybe: '🟡 Maybe',
+    weak: '⚠️ Weak Matches',
+    skip: '🔴 Skipped',
+    all: 'All Evaluations',
+  };
   function filterCards(tier, btn) {
     document.querySelectorAll('.filters button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+    let visible = 0;
     document.querySelectorAll('.card').forEach(card => {
       let show;
       if (tier === 'all') show = true;
       else if (tier === 'actionable') show = card.dataset.tier !== 'skip' && card.dataset.tier !== 'applied';
       else show = card.dataset.tier === tier;
       card.style.display = show ? '' : 'none';
+      if (show) visible++;
     });
+    const heading = document.getElementById('section-heading');
+    if (heading) {
+      heading.innerHTML = (SECTION_TITLES[tier] || tier) + ' <span class="count">' + visible + ' total</span>';
+    }
   }
   // Default view is "Actionable" - hide SKIP and Applied cards on initial load
   document.querySelectorAll('.card[data-tier="skip"], .card[data-tier="applied"]').forEach(c => c.style.display = 'none');

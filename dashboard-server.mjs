@@ -72,9 +72,14 @@ async function findLatestGenericPDF() {
 
 async function updateReportStatus(reportPath, status, appliedDate) {
   let content = await readFile(reportPath, 'utf-8');
-  content = content.replace(/\*\*Status:\*\*\s*\S+(?:\s+\S+)*$/m, `**Status:** ${status}`);
-  if (appliedDate && !/\*\*Applied:\*\*/.test(content)) {
-    content = content.replace(/\*\*Status:\*\*\s*Applied/, `**Status:** Applied\n**Applied:** ${appliedDate}`);
+  // Anchor to single line: ^...[^\n]+$ with /m flag stays within one line
+  content = content.replace(/^\*\*Status:\*\*[^\n]*$/m, `**Status:** ${status}`);
+  if (appliedDate && !/^\*\*Applied:\*\*/m.test(content)) {
+    content = content.replace(/^\*\*Status:\*\* Applied$/m, `**Status:** Applied\n**Applied:** ${appliedDate}`);
+  }
+  if (status !== 'Applied') {
+    // Remove the Applied date line if reverting
+    content = content.replace(/^\*\*Applied:\*\*[^\n]*\n/m, '');
   }
   await writeFile(reportPath, content);
 }
@@ -130,6 +135,27 @@ async function applyToJob(id) {
   };
 }
 
+async function unapplyJob(id) {
+  const report = await findReportPath(id);
+  if (!report) throw new Error(`Report not found for id ${id}`);
+
+  await updateReportStatus(report.path, 'Evaluated');
+  await updateApplicationsRow(id, 'Evaluated', '❌');
+
+  // Remove the placeholder PDF if it exists
+  const slug = slugFromReportFilename(report.filename);
+  try {
+    const outDir = resolve(__dirname, 'output');
+    const files = await readdir(outDir);
+    const matches = files.filter(f => f.startsWith(`cv-rob-rose-${slug}-`) && f.endsWith('.pdf'));
+    for (const m of matches) {
+      await (await import('node:fs/promises')).unlink(resolve(outDir, m));
+    }
+  } catch {}
+
+  return { ok: true, id, slug, status: 'Evaluated' };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
@@ -157,6 +183,17 @@ const server = http.createServer(async (req, res) => {
       if (btn) { btn.disabled = false; btn.textContent = 'Apply →'; }
     }
   };
+  window.unapplyJob = async function(id) {
+    if (!confirm('Undo apply for #' + id + '? This will revert status to Evaluated and delete the placeholder PDF.')) return;
+    try {
+      const resp = await fetch('/unapply/' + id, { method: 'POST' });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'Unapply failed');
+      setTimeout(() => location.reload(), 200);
+    } catch (err) {
+      alert('Undo failed: ' + err.message);
+    }
+  };
 </script>`;
       html = html.replace('</body>', inject + '</body>');
       res.writeHead(200, { 'Content-Type': MIME['.html'] });
@@ -168,6 +205,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/apply/')) {
       const id = url.pathname.split('/').pop();
       const result = await applyToJob(id);
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /unapply/:id
+    if (req.method === 'POST' && url.pathname.startsWith('/unapply/')) {
+      const id = url.pathname.split('/').pop();
+      const result = await unapplyJob(id);
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;

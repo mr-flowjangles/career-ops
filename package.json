@@ -9,6 +9,7 @@
     "dedup": "node dedup-tracker.mjs",
     "merge": "node merge-tracker.mjs",
     "pdf": "node generate-pdf.mjs",
+    "docx": "node generate-docx.mjs",
     "sync-check": "node cv-sync-check.mjs",
     "update:check": "node update-system.mjs check",
     "update": "node update-system.mjs apply",
@@ -33,6 +34,7 @@
   "license": "MIT",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "docx": "^9.6.1",
     "dotenv": "^16.4.5",
     "js-yaml": "^4.1.1",
     "playwright": "^1.58.1"

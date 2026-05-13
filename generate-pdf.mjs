@@ -11,10 +11,11 @@
  */
 
 import { chromium } from 'playwright';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, extname } from 'path';
 import { readFile } from 'fs/promises';
 import { mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
+import { parseMarkdown } from './cv-parser.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -91,7 +92,7 @@ async function generatePDF() {
   }
 
   if (!inputPath || !outputPath) {
-    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4]');
+    console.error('Usage: node generate-pdf.mjs <input.html|input.md> <output.pdf> [--format=letter|a4]');
     process.exit(1);
   }
 
@@ -109,8 +110,20 @@ async function generatePDF() {
   console.log(`📁 Output: ${outputPath}`);
   console.log(`📏 Format: ${format.toUpperCase()}`);
 
-  // Read HTML to inject font paths as absolute file:// URLs
-  let html = await readFile(inputPath, 'utf-8');
+  // If input is markdown, render to HTML via the shared parser + html generator.
+  let html;
+  if (extname(inputPath).toLowerCase() === '.md') {
+    const md = await readFile(inputPath, 'utf-8');
+    const model = parseMarkdown(md);
+    if (!model.name) {
+      console.error('No # Name heading found in markdown input.');
+      process.exit(1);
+    }
+    const { buildHTML } = await import('./generate-html.mjs');
+    html = buildHTML(model);
+  } else {
+    html = await readFile(inputPath, 'utf-8');
+  }
 
   // Resolve font paths relative to career-ops/fonts/
   const fontsDir = resolve(__dirname, 'fonts');

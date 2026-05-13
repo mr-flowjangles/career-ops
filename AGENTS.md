@@ -57,6 +57,7 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `templates/cv-template.html` | HTML template for CVs |
 | `templates/cv-template.tex` | LaTeX/Overleaf template for CVs |
 | `generate-pdf.mjs` | Playwright: HTML to PDF |
+| `generate-docx.mjs` | Markdown CV to ATS-friendly .docx (Word) |
 | `generate-latex.mjs` | LaTeX CV validator + pdflatex compiler |
 | `article-digest.md` | Compact proof points from portfolio (optional) |
 | `interview-prep/story-bank.md` | Accumulated STAR+R stories across evaluations |
@@ -201,6 +202,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Asks for company research | `deep` |
 | Preps for interview at specific company | `interview-prep` |
 | Wants to generate CV/PDF | `pdf` |
+| Wants to generate CV in Word (.docx) | `docx` |
 | Evaluates a course/cert | `training` |
 | Evaluates portfolio project | `project` |
 | Asks about application status | `tracker` |

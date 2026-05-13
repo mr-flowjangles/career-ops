@@ -100,10 +100,11 @@ async function updateReportStatus(reportPath, status, appliedDate) {
     content = content.replace(/^\*\*Status:\*\* Applied$/m, `**Status:** Applied\n**Applied:** ${appliedDate}`);
   }
   if (status === 'Evaluated') {
-    // Reverting all the way back: scrub Applied / Rejected / Rejection Note
+    // Reverting all the way back: scrub all decision metadata
     content = content.replace(/^\*\*Applied:\*\*[^\n]*\n/m, '');
     content = content.replace(/^\*\*Rejected:\*\*[^\n]*\n/m, '');
     content = content.replace(/^\*\*Rejection Note:\*\*[^\n]*\n/m, '');
+    content = content.replace(/^\*\*Skip Note:\*\*[^\n]*\n/m, '');
   } else if (status === 'Rejected') {
     // Keep Applied (history), Rejected/Note are set by rejectJob
   } else if (status !== 'Applied') {
@@ -193,6 +194,27 @@ async function applyToJob(id) {
       ? 'Placeholder PDF: copy of your generic CV. Ask Claude in chat "tailor PDF for #' + id + '" for a JD-customized version.'
       : 'No generic CV PDF found. Run `node generate-pdf.mjs cv.md output/cv-rob-rose-{date}.pdf --format=letter` first.',
   };
+}
+
+async function skipJob(id, reason) {
+  const report = await findReportPath(id);
+  if (!report) throw new Error(`Report not found for id ${id}`);
+
+  const note = (reason || '').replace(/\r?\n+/g, ' ').trim();
+  let content = await readFile(report.path, 'utf-8');
+  content = content.replace(/^\*\*Status:\*\*[^\n]*$/m, '**Status:** SKIP');
+  if (note) {
+    if (/^\*\*Skip Note:\*\*/m.test(content)) {
+      content = content.replace(/^\*\*Skip Note:\*\*[^\n]*$/m, `**Skip Note:** ${note}`);
+    } else {
+      content = content.replace(/^\*\*Status:\*\* SKIP$/m, `**Status:** SKIP\n**Skip Note:** ${note}`);
+    }
+  } else {
+    content = content.replace(/^\*\*Skip Note:\*\*[^\n]*\n/m, '');
+  }
+  await writeFile(report.path, content);
+  await updateApplicationsRow(id, 'SKIP');
+  return { ok: true, id, status: 'SKIP', reason: note };
 }
 
 async function rejectJob(id, reason) {
@@ -321,6 +343,22 @@ const server = http.createServer(async (req, res) => {
       alert('Mark Rejected failed: ' + err.message);
     }
   };
+  window.skipJob = async function(id) {
+    const reason = prompt('Why are you skipping this? (optional)');
+    if (reason === null) return;
+    try {
+      const resp = await fetch('/skip/' + id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || '' })
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'Skip failed');
+      setTimeout(() => location.reload(), 200);
+    } catch (err) {
+      alert('Skip failed: ' + err.message);
+    }
+  };
 </script>`;
       html = html.replace('</body>', inject + '</body>');
       res.writeHead(200, { 'Content-Type': MIME['.html'] });
@@ -367,6 +405,23 @@ const server = http.createServer(async (req, res) => {
       let reason = '';
       try { reason = (JSON.parse(body || '{}').reason || '').toString(); } catch {}
       const result = await rejectJob(id, reason);
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /skip/:id — body: { reason }
+    if (req.method === 'POST' && url.pathname.startsWith('/skip/')) {
+      const id = url.pathname.split('/').pop();
+      let body = '';
+      await new Promise((res2, rej2) => {
+        req.on('data', chunk => body += chunk);
+        req.on('end', res2);
+        req.on('error', rej2);
+      });
+      let reason = '';
+      try { reason = (JSON.parse(body || '{}').reason || '').toString(); } catch {}
+      const result = await skipJob(id, reason);
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;

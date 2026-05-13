@@ -65,6 +65,7 @@ function parseReport(filename, content) {
     applied: m(/^\*\*Applied:\*\*\s*(.+)/m),
     rejected: m(/^\*\*Rejected:\*\*\s*(.+)/m),
     rejectionNote: m(/^\*\*Rejection Note:\*\*\s*(.+)/m),
+    skipNote: m(/^\*\*Skip Note:\*\*\s*(.+)/m),
     legitimacy: m(/^\*\*Legitimacy:\*\*\s*(.+)/m),
     tldr: pipe('TL;DR'),
     archetype: pipe('Arquetipo') || pipe('Archetype'),
@@ -156,13 +157,14 @@ function buildHTML(reports) {
     const role = (r.title.split('—').slice(1).join('—') || '').trim();
     const isApplied = tier === 'applied';
     const isRejected = tier === 'rejected';
+    const isSkip = tier === 'skip';
     const slug = (r.file.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/) || [])[1] || 'unknown';
     const hasPdf = !!r.pdfFile;
     const pdfHref = r.pdfFile ? `output/${r.pdfFile}` : '';
 
     // Apply button: server-mode uses fetch, static-mode is a plain link
-    const applyBtn = (isApplied || isRejected)
-      ? '' // these cards get View Resume + Open JD instead
+    const applyBtn = (isApplied || isRejected || isSkip)
+      ? '' // these cards get other actions instead
       : (r.url
           ? `<a class="btn primary" href="${esc(r.url)}" target="_blank" rel="noopener" data-apply-id="${r.id}" onclick="if(window.CAREER_OPS_SERVER){event.preventDefault();window.applyToJob('${r.id}', '${esc(r.url)}');}">Apply →</a>`
           : '');
@@ -180,8 +182,13 @@ function buildHTML(reports) {
       ? `<button class="btn reject" onclick="if(window.CAREER_OPS_SERVER){window.rejectJob('${r.id}');}else{alert('Mark Rejected requires the dashboard server. Run: npm run dashboard:serve');}">❌ Mark Rejected</button>`
       : '';
 
-    const undoBtn = (isApplied || isRejected)
-      ? `<button class="btn undo" onclick="if(window.CAREER_OPS_SERVER){window.unapplyJob('${r.id}');}else{alert('Undo requires the dashboard server. Run: npm run dashboard:serve');}">${isRejected ? 'Undo' : 'Undo apply'}</button>`
+    const skipBtn = (!isApplied && !isRejected && !isSkip)
+      ? `<button class="btn skip-it" onclick="if(window.CAREER_OPS_SERVER){window.skipJob('${r.id}');}else{alert('Skip requires the dashboard server. Run: npm run dashboard:serve');}">🙅 Not interested</button>`
+      : '';
+
+    const undoLabel = isRejected ? 'Undo' : (isSkip ? 'Restore' : 'Undo apply');
+    const undoBtn = (isApplied || isRejected || isSkip)
+      ? `<button class="btn undo" onclick="if(window.CAREER_OPS_SERVER){window.unapplyJob('${r.id}');}else{alert('Undo requires the dashboard server. Run: npm run dashboard:serve');}">${undoLabel}</button>`
       : '';
 
     const banner = isApplied
@@ -192,6 +199,10 @@ function buildHTML(reports) {
 
     const rejectionNoteBlock = isRejected && r.rejectionNote
       ? `<div class="rejection-note"><strong>Why:</strong>${esc(r.rejectionNote)}</div>`
+      : '';
+
+    const skipNoteBlock = isSkip && r.skipNote
+      ? `<div class="rejection-note"><strong>Why skipped:</strong>${esc(r.skipNote)}</div>`
       : '';
 
     return `
@@ -211,6 +222,7 @@ function buildHTML(reports) {
       ${r.tldr ? `<p class="tldr">${esc(r.tldr)}</p>` : ''}
 
       ${rejectionNoteBlock}
+      ${skipNoteBlock}
 
       <dl class="meta">
         ${r.archetype ? `<div><dt>Archetype</dt><dd>${esc(r.archetype)}</dd></div>` : ''}
@@ -224,10 +236,11 @@ function buildHTML(reports) {
 
       <footer class="card-actions">
         ${applyBtn}
-        ${resumeBtn}
+        ${isSkip ? '' : resumeBtn}
         ${reapplyBtn}
         <button class="btn secondary" onclick="toggleDetails('details-${r.id}')">View details</button>
         ${rejectBtn}
+        ${skipBtn}
         ${undoBtn}
       </footer>
 
@@ -390,6 +403,16 @@ function buildHTML(reports) {
     font-size: 12px;
   }
   .btn.reject:hover {
+    color: var(--skip);
+    border-color: var(--skip);
+  }
+  .btn.skip-it {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .btn.skip-it:hover {
     color: var(--skip);
     border-color: var(--skip);
   }

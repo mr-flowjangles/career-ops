@@ -103,6 +103,13 @@ function statusBadge(status) {
   return 'evaluated';
 }
 
+function companyToPascal(name) {
+  return name
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\s+(AI|ML|Inc\.?|LLC|Corp\.?|Co\.|Ltd\.?)$/i, '')
+    .replace(/[^a-zA-Z0-9]/g, '');
+}
+
 async function loadReports() {
   const files = (await readdir(REPORTS_DIR))
     .filter(f => f.endsWith('.md'))
@@ -112,9 +119,16 @@ async function loadReports() {
   for (const f of files) {
     const content = await readFile(resolve(REPORTS_DIR, f), 'utf-8');
     const r = parseReport(f, content);
-    // Detect existing PDF for this slug
     const slug = (f.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/) || [])[1];
-    r.pdfFile = slug ? outFiles.find(pf => pf.startsWith(`cv-rob-rose-${slug}-`) && pf.endsWith('.pdf')) : null;
+    // Extract company from the report's H1: "# 003 — Arize AI — Engineering Manager"
+    const firstLine = (content.split('\n')[0] || '').replace(/^#\s+/, '');
+    const titleParts = firstLine.split(/\s+[—-]\s+/).map(p => p.trim());
+    const company = titleParts[1] || '';
+    const pascalCompany = companyToPascal(company);
+    // Look for new RobRose{Company}.pdf naming first, fall back to legacy
+    r.pdfFile = (pascalCompany && outFiles.find(pf => pf === `RobRose${pascalCompany}.pdf`))
+      || (slug && outFiles.find(pf => pf.startsWith(`cv-rob-rose-${slug}-`) && pf.endsWith('.pdf')))
+      || null;
     reports.push(r);
   }
   return reports;

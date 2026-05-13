@@ -58,6 +58,28 @@ function slugFromReportFilename(filename) {
   return m ? m[1] : 'unknown';
 }
 
+// Extract the company name from a report's H1 line: "# 003 — Arize AI — Engineering Manager".
+async function extractCompany(reportPath) {
+  const content = await readFile(reportPath, 'utf-8');
+  const firstLine = (content.split('\n')[0] || '').replace(/^#\s+/, '');
+  const parts = firstLine.split(/\s+[—-]\s+/).map(p => p.trim());
+  // parts[0] is the ID number, parts[1] is the company, parts[2] is the role
+  return parts[1] || 'Unknown';
+}
+
+// "Arize AI" → "Arize". "Pearl Health" → "PearlHealth". "GHX (Global Healthcare Exchange)" → "GHX".
+function companyToPascal(name) {
+  return name
+    .replace(/\([^)]*\)/g, '')                                              // strip parens
+    .replace(/\s+(AI|ML|Inc\.?|LLC|Corp\.?|Co\.|Ltd\.?)$/i, '')             // drop trailing entity word
+    .replace(/[^a-zA-Z0-9]/g, '');                                          // PascalCase
+}
+
+async function tailoredPdfName(reportPath) {
+  const company = await extractCompany(reportPath);
+  return `RobRose${companyToPascal(company)}.pdf`;
+}
+
 async function findLatestGenericPDF() {
   const outDir = resolve(__dirname, 'output');
   try {
@@ -109,7 +131,7 @@ async function generatePdfForJob(id) {
 
   const date = new Date().toISOString().slice(0, 10);
   const slug = slugFromReportFilename(report.filename);
-  const pdfName = `cv-rob-rose-${slug}-${date}.pdf`;
+  const pdfName = await tailoredPdfName(report.path);
   const pdfPath = resolve(__dirname, 'output', pdfName);
 
   const generic = await findLatestGenericPDF();
@@ -141,7 +163,7 @@ async function applyToJob(id) {
 
   const date = new Date().toISOString().slice(0, 10);
   const slug = slugFromReportFilename(report.filename);
-  const pdfName = `cv-rob-rose-${slug}-${date}.pdf`;
+  const pdfName = await tailoredPdfName(report.path);
   const pdfPath = resolve(__dirname, 'output', pdfName);
 
   const generic = await findLatestGenericPDF();
@@ -174,14 +196,19 @@ async function unapplyJob(id) {
   await updateReportStatus(report.path, 'Evaluated');
   await updateApplicationsRow(id, 'Evaluated', '❌');
 
-  // Remove the placeholder PDF if it exists
+  // Remove the placeholder PDF if it exists (new RobRose{Company}.pdf naming
+  // plus the old cv-rob-rose-{slug}-{date}.pdf naming for backward compat)
   const slug = slugFromReportFilename(report.filename);
+  const newName = await tailoredPdfName(report.path);
+  const { unlink } = await import('node:fs/promises');
   try {
     const outDir = resolve(__dirname, 'output');
     const files = await readdir(outDir);
-    const matches = files.filter(f => f.startsWith(`cv-rob-rose-${slug}-`) && f.endsWith('.pdf'));
+    const matches = files.filter(f =>
+      f === newName || (f.startsWith(`cv-rob-rose-${slug}-`) && f.endsWith('.pdf'))
+    );
     for (const m of matches) {
-      await (await import('node:fs/promises')).unlink(resolve(outDir, m));
+      await unlink(resolve(outDir, m));
     }
   } catch {}
 

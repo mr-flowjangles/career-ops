@@ -79,11 +79,13 @@ async function generatePDF() {
   const args = process.argv.slice(2);
 
   // Parse arguments
-  let inputPath, outputPath, format = 'a4';
+  let inputPath, outputPath, format = 'a4', ats = false;
 
   for (const arg of args) {
     if (arg.startsWith('--format=')) {
       format = arg.split('=')[1].toLowerCase();
+    } else if (arg === '--ats') {
+      ats = true;
     } else if (!inputPath) {
       inputPath = arg;
     } else if (!outputPath) {
@@ -119,8 +121,14 @@ async function generatePDF() {
       console.error('No # Name heading found in markdown input.');
       process.exit(1);
     }
-    const { buildHTML } = await import('./generate-html.mjs');
-    html = buildHTML(model);
+    if (ats) {
+      const { buildATSHTML } = await import('./generate-html-ats.mjs');
+      html = buildATSHTML(model);
+      console.log('ATS mode: rendering with plain Helvetica/Arial template');
+    } else {
+      const { buildHTML } = await import('./generate-html.mjs');
+      html = buildHTML(model);
+    }
   } else {
     html = await readFile(inputPath, 'utf-8');
   }

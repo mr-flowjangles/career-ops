@@ -48,15 +48,23 @@ function renderSubsection(s) {
   const bullets = s.bullets.map(b => `<li>${inlineHTML(b)}</li>`).join('\n        ');
   const meta = s.meta ? `<span class="job-period">${esc(s.meta)}</span>` : '';
   const intro = s.intro ? `<div class="job-intro">${inlineHTML(s.intro)}</div>` : '';
-  const ul = s.bullets.length ? `<ul>\n        ${bullets}\n      </ul>` : '';
+  const firstBullet = s.bullets[0] ? `<li>${inlineHTML(s.bullets[0])}</li>` : '';
+  const restBullets = s.bullets.slice(1).map(b => `<li>${inlineHTML(b)}</li>`).join('\n        ');
+  // Wrap header + intro + first bullet so they always stay together on the
+  // same page. Remaining bullets can flow naturally across page breaks.
+  const headerBlock = `<div class="job-keep">
+        <div class="job-header">
+          <span class="job-company">${inlineHTML(s.heading)}</span>
+          ${meta}
+        </div>
+        ${intro}
+        ${firstBullet ? `<ul class="job-first">${firstBullet}</ul>` : ''}
+      </div>`;
+  const restUl = restBullets ? `<ul class="job-rest">\n        ${restBullets}\n      </ul>` : '';
   return `
     <div class="job">
-      <div class="job-header">
-        <span class="job-company">${inlineHTML(s.heading)}</span>
-        ${meta}
-      </div>
-      ${intro}
-      ${ul}
+      ${headerBlock}
+      ${restUl}
     </div>`;
 }
 
@@ -167,6 +175,8 @@ export function buildHTML(doc) {
     padding-bottom: 4px;
     margin-bottom: 10px;
     line-height: 1.2;
+    break-after: avoid;
+    page-break-after: avoid;
   }
 
   .section-text {
@@ -221,6 +231,23 @@ export function buildHTML(doc) {
     page-break-inside: avoid;
   }
   .job-header, .job-intro { break-after: avoid; page-break-after: avoid; }
+  /* Keep job header + intro + first bullet together so a job header never
+     orphans at the bottom of a page without its content. */
+  .job-keep {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .job-first, .job-rest {
+    padding-left: 18px;
+    margin-top: 6px;
+  }
+  .job-first li, .job-rest li {
+    font-size: 10.5px;
+    line-height: 1.6;
+    color: #333;
+    margin-bottom: 4px;
+  }
+  .job-first { margin-top: 0; }
 </style>
 </head>
 <body>

@@ -95,12 +95,44 @@ async function updateApplicationsRow(id, status, pdfFlag) {
     const cols = line.split('|');
     if (cols.length < 10) return line;
     if (cols[1].trim() !== idShort) return line;
-    cols[6] = ` ${status} `;          // Status column
-    if (pdfFlag !== undefined) cols[7] = ` ${pdfFlag} `; // PDF column
+    if (status !== undefined) cols[6] = ` ${status} `;     // Status column
+    if (pdfFlag !== undefined) cols[7] = ` ${pdfFlag} `;   // PDF column
     return cols.join('|');
   });
 
   await writeFile(trackerPath, updatedLines.join('\n'));
+}
+
+async function generatePdfForJob(id) {
+  const report = await findReportPath(id);
+  if (!report) throw new Error(`Report not found for id ${id}`);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const slug = slugFromReportFilename(report.filename);
+  const pdfName = `cv-rob-rose-${slug}-${date}.pdf`;
+  const pdfPath = resolve(__dirname, 'output', pdfName);
+
+  const generic = await findLatestGenericPDF();
+  if (!generic || !existsSync(generic)) {
+    throw new Error('No generic CV PDF found. Run `node generate-pdf.mjs cv.md output/cv-rob-rose-{date}.pdf --format=letter` first.');
+  }
+  await copyFile(generic, pdfPath);
+
+  // Update report PDF flag to ✅ (status untouched)
+  let content = await readFile(report.path, 'utf-8');
+  content = content.replace(/^\*\*PDF:\*\*[^\n]*$/m, '**PDF:** ✅');
+  await writeFile(report.path, content);
+
+  await updateApplicationsRow(id, undefined, '✅');
+
+  return {
+    ok: true,
+    id,
+    slug,
+    pdfPath: `/output/${pdfName}`,
+    pdfTailored: false,
+    note: 'Placeholder PDF: copy of your generic CV. For a JD-tailored version, ask Claude in chat "tailor PDF for #' + id + '".',
+  };
 }
 
 async function applyToJob(id) {
@@ -194,6 +226,18 @@ const server = http.createServer(async (req, res) => {
       alert('Undo failed: ' + err.message);
     }
   };
+  window.generateResume = async function(id, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+    try {
+      const resp = await fetch('/generate-pdf/' + id, { method: 'POST' });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'Generate failed');
+      setTimeout(() => location.reload(), 200);
+    } catch (err) {
+      alert('Generate failed: ' + err.message);
+      if (btn) { btn.disabled = false; btn.textContent = '📄 Generate Resume'; }
+    }
+  };
 </script>`;
       html = html.replace('</body>', inject + '</body>');
       res.writeHead(200, { 'Content-Type': MIME['.html'] });
@@ -214,6 +258,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/unapply/')) {
       const id = url.pathname.split('/').pop();
       const result = await unapplyJob(id);
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /generate-pdf/:id
+    if (req.method === 'POST' && url.pathname.startsWith('/generate-pdf/')) {
+      const id = url.pathname.split('/').pop();
+      const result = await generatePdfForJob(id);
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;

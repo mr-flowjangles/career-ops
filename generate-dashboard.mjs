@@ -107,10 +107,15 @@ async function loadReports() {
   const files = (await readdir(REPORTS_DIR))
     .filter(f => f.endsWith('.md'))
     .sort();
+  const outFiles = await readdir(OUT_DIR).catch(() => []);
   const reports = [];
   for (const f of files) {
     const content = await readFile(resolve(REPORTS_DIR, f), 'utf-8');
-    reports.push(parseReport(f, content));
+    const r = parseReport(f, content);
+    // Detect existing PDF for this slug
+    const slug = (f.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/) || [])[1];
+    r.pdfFile = slug ? outFiles.find(pf => pf.startsWith(`cv-rob-rose-${slug}-`) && pf.endsWith('.pdf')) : null;
+    reports.push(r);
   }
   return reports;
 }
@@ -131,14 +136,20 @@ function buildHTML(reports) {
     const role = (r.title.split('—').slice(1).join('—') || '').trim();
     const isApplied = tier === 'applied';
     const slug = (r.file.match(/^\d+-(.+)-\d{4}-\d{2}-\d{2}\.md$/) || [])[1] || 'unknown';
-    const pdfHref = `output/cv-rob-rose-${slug}-${r.applied || ''}.pdf`;
+    const hasPdf = !!r.pdfFile;
+    const pdfHref = r.pdfFile ? `output/${r.pdfFile}` : '';
 
     // Apply button: server-mode uses fetch, static-mode is a plain link
     const applyBtn = isApplied
-      ? `<a class="btn applied-pdf" href="${pdfHref}" target="_blank">📄 View tailored CV</a>`
+      ? '' // Applied cards get View Resume + Open JD instead
       : (r.url
           ? `<a class="btn primary" href="${esc(r.url)}" target="_blank" rel="noopener" data-apply-id="${r.id}" onclick="if(window.CAREER_OPS_SERVER){event.preventDefault();window.applyToJob('${r.id}', '${esc(r.url)}');}">Apply →</a>`
           : '');
+
+    // Resume button: View Resume if PDF exists, otherwise Generate Resume
+    const resumeBtn = hasPdf
+      ? `<a class="btn applied-pdf" href="${pdfHref}" target="_blank">📄 View Resume</a>`
+      : `<button class="btn secondary" onclick="if(window.CAREER_OPS_SERVER){window.generateResume('${r.id}', this);}else{alert('Generate Resume requires the dashboard server. Run: npm run dashboard:serve');}">📄 Generate Resume</button>`;
 
     const reapplyBtn = isApplied && r.url
       ? `<a class="btn secondary" href="${esc(r.url)}" target="_blank" rel="noopener">Open JD</a>`
@@ -179,6 +190,7 @@ function buildHTML(reports) {
 
       <footer class="card-actions">
         ${applyBtn}
+        ${resumeBtn}
         ${reapplyBtn}
         <button class="btn secondary" onclick="toggleDetails('details-${r.id}')">View details</button>
         ${undoBtn}

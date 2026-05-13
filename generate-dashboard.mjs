@@ -306,6 +306,31 @@ function buildHTML(reports) {
     background-clip: text;
     color: transparent;
   }
+  .page-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .btn.scan-btn {
+    background: white;
+    border: 1.5px solid var(--cyan);
+    color: var(--cyan);
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn.scan-btn:hover {
+    background: var(--cyan);
+    color: white;
+  }
+  .btn.scan-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
   header.page .subtitle {
     font-size: 13px;
     color: var(--muted);
@@ -582,7 +607,10 @@ function buildHTML(reports) {
 <body>
 
 <header class="page">
-  <h1>Career-Ops Dashboard</h1>
+  <div class="page-header-row">
+    <h1>Career-Ops Dashboard</h1>
+    <button class="btn scan-btn" onclick="if(window.CAREER_OPS_SERVER){window.scanForJobs(this);}else{alert('Scan requires the dashboard server. Run: make up');}">🔍 Scan for new jobs</button>
+  </div>
   <div class="subtitle">${actionable} actionable · ${counts.applied} applied · ${counts.rejected} rejected · ${counts.skip} skipped · generated ${new Date().toISOString().slice(0,10)}</div>
   <div class="filters">
     <button class="active" onclick="filterCards('actionable', this)">Actionable (${actionable})</button>

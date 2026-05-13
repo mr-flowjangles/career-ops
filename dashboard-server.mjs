@@ -196,6 +196,28 @@ async function applyToJob(id) {
   };
 }
 
+async function runScan() {
+  const { stdout } = await execAsync('node scan.mjs', {
+    cwd: __dirname,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  const num = (re) => {
+    const m = stdout.match(re);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+  // Parse the scan summary lines (see scan.mjs output)
+  return {
+    ok: true,
+    companies: num(/Companies scanned:\s+(\d+)/),
+    totalJobs: num(/Total jobs found:\s+(\d+)/),
+    titleFiltered: num(/Filtered by title:\s+(\d+)/),
+    locationFiltered: num(/Filtered by location:\s+(\d+)/),
+    duplicates: num(/Duplicates:\s+(\d+)/),
+    newOffers: num(/New offers added:\s+(\d+)/),
+    summaryTail: stdout.split('\n').slice(-80).join('\n'),
+  };
+}
+
 async function skipJob(id, reason) {
   const report = await findReportPath(id);
   if (!report) throw new Error(`Report not found for id ${id}`);
@@ -343,6 +365,32 @@ const server = http.createServer(async (req, res) => {
       alert('Mark Rejected failed: ' + err.message);
     }
   };
+  window.scanForJobs = async function(btn) {
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '🔍 Scanning…'; }
+    try {
+      const resp = await fetch('/scan', { method: 'POST' });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'Scan failed');
+      const msg = data.newOffers > 0
+        ? '✅ Scan complete!\\n\\nCompanies scanned: ' + data.companies +
+          '\\nNew openings: ' + data.newOffers +
+          '\\n\\nThe new URLs are queued in data/pipeline.md. To get them ' +
+          'evaluated (scored, with full reports), switch to Claude Code and ' +
+          'say: \"evaluate the new jobs\". The reports + dashboard will ' +
+          'update with each batch.'
+        : '✅ Scan complete — no new openings.\\n\\n' +
+          'Companies scanned: ' + data.companies + '\\n' +
+          'Total jobs found: ' + data.totalJobs + '\\n' +
+          'Filtered out by title/location: ' + (data.titleFiltered + data.locationFiltered) +
+          '\\nDuplicates already in your pipeline: ' + data.duplicates;
+      alert(msg);
+    } catch (err) {
+      alert('Scan failed: ' + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = original || '🔍 Scan for new jobs'; }
+    }
+  };
   window.skipJob = async function(id) {
     const reason = prompt('Why are you skipping this? (optional)');
     if (reason === null) return;
@@ -405,6 +453,14 @@ const server = http.createServer(async (req, res) => {
       let reason = '';
       try { reason = (JSON.parse(body || '{}').reason || '').toString(); } catch {}
       const result = await rejectJob(id, reason);
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /scan — run scan.mjs and return summary
+    if (req.method === 'POST' && url.pathname === '/scan') {
+      const result = await runScan();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;

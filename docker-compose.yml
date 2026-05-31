@@ -1,0 +1,47 @@
+# Career-Ops dashboard — local dev stack.
+#
+# Wraps `node dashboard-server.mjs` (pure Node stdlib, no deps) in a container
+# so the App Catalog dashboard can manage it. Bind-mounts the repo so the
+# SQLite DB and data/ files stay on the host and survive container recreation.
+#
+# Operator prereqs:
+#   1. `cd ~/_BELLESE/AI_BELLESE/app-catalog && docker compose up -d`
+#      (brings up Traefik + creates the `appcatalog` network).
+#   2. dnsmasq or `/etc/hosts` wildcard for *.test → 127.0.0.1.
+#
+# Then either:
+#   - `docker compose up -d` from this directory, or
+#   - Click "Start" on the Career-Ops tile in app-catalog.
+
+services:
+  career-ops:
+    # better-sqlite3 ships a precompiled native binary; using node:20 (Debian)
+    # so npm install can fetch the matching prebuild without needing build tools.
+    image: node:20
+    container_name: career-ops
+    working_dir: /app
+    volumes:
+      - .:/app
+      # Named volume keeps the linux-built node_modules out of the host's
+      # macOS-built node_modules. First boot runs `npm install` (~30s);
+      # subsequent boots reuse it.
+      - career-ops-node-modules:/app/node_modules
+    command: >
+      sh -c "test -f node_modules/.installed || (npm install --omit=dev && touch node_modules/.installed) &&
+             node dashboard-server.mjs"
+    restart: unless-stopped
+    networks:
+      - appcatalog
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.career-ops.rule=Host(`career-ops.test`)"
+      - "traefik.http.routers.career-ops.entrypoints=web"
+      - "traefik.http.services.career-ops.loadbalancer.server.port=3030"
+
+volumes:
+  career-ops-node-modules:
+
+networks:
+  appcatalog:
+    external: true
+    name: appcatalog

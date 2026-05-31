@@ -7,17 +7,29 @@
  * - 8-col: num\tdate\tcompany\trole\tstatus\tscore\tpdf\treport (no notes)
  * - Pipe-delimited (markdown table row): | col | col | ... |
  *
- * Dedup: company normalized + role fuzzy match + report number match
- * If duplicate with higher score → update in-place, update report link
- * Validates status against states.yml (rejects non-canonical, logs warning)
+ * Dedup priority:
+ *   1. Same report number (re-processing same TSV)
+ *   2. Same URL — the canonical dedup key (read from the report file's
+ *      **URL:** header). Falls back to applications.md if career-ops.db
+ *      is missing.
+ *
+ * The old fuzzy company+role match was removed — it false-positived on
+ * distinct roles at the same company (e.g., Cohere TPM Release Ops vs
+ * Cohere TPM Product Engineering).
+ *
+ * If duplicate with higher score → update in-place, update report link.
+ * Validates status against states.yml (rejects non-canonical, logs warning).
  *
  * Run: node career-ops/merge-tracker.mjs [--dry-run] [--verify]
  */
 
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs';
-import { join, basename, dirname } from 'path';
+import { join, basename, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original)
@@ -26,8 +38,64 @@ const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
   : join(CAREER_OPS, 'applications.md');
 const ADDITIONS_DIR = join(CAREER_OPS, 'batch/tracker-additions');
 const MERGED_DIR = join(ADDITIONS_DIR, 'merged');
+const REPORTS_DIR = join(CAREER_OPS, 'reports');
+const DB_PATH = join(CAREER_OPS, 'career-ops.db');
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERIFY = process.argv.includes('--verify');
+
+// Read the **URL:** header from a report file. Returns null if missing/unreadable.
+function readReportUrl(reportPath) {
+  try {
+    const content = readFileSync(reportPath, 'utf-8');
+    const m = content.match(/^\*\*URL:\*\*\s*(\S+)/m);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Resolve a markdown link like "[055](reports/055-foo-2026-05-14.md)" to an absolute path.
+function reportPathFromLink(link) {
+  if (!link) return null;
+  const m = link.match(/\(([^)]+)\)/);
+  const rel = m ? m[1] : link;
+  return resolve(CAREER_OPS, rel);
+}
+
+// Build URL → existing-app-entry map. Prefer DB (fast); fall back to reading report files.
+function buildUrlIndex(existingApps) {
+  const urlToApp = new Map();
+  let dbHits = 0, fileHits = 0;
+
+  if (existsSync(DB_PATH)) {
+    try {
+      // Lazy import — only fail soft if better-sqlite3 isn't installed.
+      const Database = require('better-sqlite3');
+      const db = new Database(DB_PATH, { readonly: true });
+      const rows = db.prepare("SELECT id, url FROM evaluations WHERE url IS NOT NULL AND url != ''").all();
+      db.close();
+      const idToUrl = new Map();
+      for (const r of rows) idToUrl.set(r.id, r.url);
+      for (const app of existingApps) {
+        const url = idToUrl.get(app.num);
+        if (url) { urlToApp.set(url, app); dbHits++; }
+      }
+    } catch (e) {
+      // DB unavailable — fall through to file reads below.
+    }
+  }
+
+  // Fallback: read URL from each report file for any entries not yet mapped.
+  const mappedApps = new Set(urlToApp.values());
+  for (const app of existingApps) {
+    if (mappedApps.has(app)) continue;
+    const reportPath = reportPathFromLink(app.report);
+    if (!reportPath) continue;
+    const url = readReportUrl(reportPath);
+    if (url) { urlToApp.set(url, app); fileHits++; }
+  }
+  return { urlToApp, dbHits, fileHits };
+}
 
 // Ensure required directories exist (fresh setup)
 mkdirSync(join(CAREER_OPS, 'data'), { recursive: true });
@@ -65,59 +133,6 @@ function validateStatus(status) {
 
   console.warn(`⚠️  Non-canonical status "${status}" → defaulting to "Evaluated"`);
   return 'Evaluated';
-}
-
-function normalizeCompany(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-// Tokens that almost every role shares — must NOT count as signal.
-// Includes seniority, work-mode, contract, and common locations.
-const ROLE_STOPWORDS = new Set([
-  // seniority / level
-  'junior', 'mid', 'middle', 'senior', 'staff', 'principal', 'lead', 'head',
-  'chief', 'associate', 'intern', 'entry', 'level',
-  // contract / mode
-  'remote', 'hybrid', 'onsite', 'contract', 'contractor', 'freelance',
-  'fulltime', 'parttime', 'permanent', 'temporary', 'intern', 'internship',
-  // generic job words
-  'role', 'position', 'opportunity', 'team', 'based',
-  // very common locations (extend in portals.yml later if needed)
-  'bangalore', 'bengaluru', 'mumbai', 'delhi', 'hyderabad', 'pune', 'chennai',
-  'london', 'berlin', 'paris', 'madrid', 'barcelona', 'amsterdam', 'dublin',
-  'york', 'francisco', 'seattle', 'boston', 'austin', 'chicago', 'toronto',
-  'tokyo', 'singapore', 'sydney', 'melbourne', 'lisbon', 'warsaw',
-  // regions / countries
-  'europe', 'emea', 'apac', 'latam', 'americas', 'india', 'spain', 'germany',
-  'france', 'italy', 'canada', 'brazil', 'mexico', 'japan',
-  // prepositions leaking through length filter
-  'with', 'from', 'into', 'over', 'this', 'that',
-]);
-
-function roleTokens(s) {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 3 && !ROLE_STOPWORDS.has(w));
-}
-
-function roleFuzzyMatch(a, b) {
-  const wordsA = roleTokens(a);
-  const wordsB = roleTokens(b);
-  if (wordsA.length === 0 || wordsB.length === 0) return false;
-
-  const setB = new Set(wordsB);
-  const overlap = wordsA.filter(w => setB.has(w)).length;
-  if (overlap === 0) return false;
-
-  // Jaccard-style ratio on content tokens. Two roles are "the same" only
-  // when the overlap dominates the smaller side — not when they just share
-  // a location + "engineer".
-  const minLen = Math.min(wordsA.length, wordsB.length);
-  const ratio = overlap / minLen;
-
-  return overlap >= 2 && ratio >= 0.6;
 }
 
 function extractReportNum(reportStr) {
@@ -270,6 +285,12 @@ tsvFiles.sort((a, b) => {
 
 console.log(`📥 Found ${tsvFiles.length} pending additions`);
 
+// Build URL index of existing entries (DB-first, file-fallback).
+const { urlToApp, dbHits, fileHits } = buildUrlIndex(existingApps);
+if (dbHits || fileHits) {
+  console.log(`🔗 URL index: ${dbHits} from DB, ${fileHits} from files (${urlToApp.size} mapped of ${existingApps.length})`);
+}
+
 let added = 0;
 let updated = 0;
 let skipped = 0;
@@ -280,32 +301,31 @@ for (const file of tsvFiles) {
   const addition = parseTsvContent(content, file);
   if (!addition) { skipped++; continue; }
 
-  // Check for duplicate by:
-  // 1. Exact report number match
-  // 2. Company + role fuzzy match
+  // Dedup priority:
+  //   1. Same report number (re-processing same TSV)
+  //   2. Same entry number
+  //   3. Same URL (canonical) — read URL from this TSV's report file
   const reportNum = extractReportNum(addition.report);
   let duplicate = null;
 
   if (reportNum) {
-    // Check if this report number already exists
-    duplicate = existingApps.find(app => {
-      const existingReportNum = extractReportNum(app.report);
-      return existingReportNum === reportNum;
-    });
+    duplicate = existingApps.find(app => extractReportNum(app.report) === reportNum);
   }
 
   if (!duplicate) {
-    // Exact entry number match
     duplicate = existingApps.find(app => app.num === addition.num);
   }
 
   if (!duplicate) {
-    // Company + role fuzzy match
-    const normCompany = normalizeCompany(addition.company);
-    duplicate = existingApps.find(app => {
-      if (normalizeCompany(app.company) !== normCompany) return false;
-      return roleFuzzyMatch(addition.role, app.role);
-    });
+    // URL-based match: read the new report's URL, look it up in the index.
+    const newReportPath = reportPathFromLink(addition.report);
+    const newUrl = newReportPath ? readReportUrl(newReportPath) : null;
+    if (newUrl) {
+      duplicate = urlToApp.get(newUrl) || null;
+      if (duplicate) {
+        console.log(`🔗 URL match: ${addition.company} — ${addition.role} → existing #${duplicate.num}`);
+      }
+    }
   }
 
   if (duplicate) {

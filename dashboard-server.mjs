@@ -25,6 +25,14 @@ import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import {
+  getOnboardingStatus,
+  renderWizardHTML,
+  writeCv,
+  writeProfile,
+  writePortals,
+  ensureUserProfileMd,
+} from './onboarding.mjs';
 
 const execAsync = promisify(exec);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -44,6 +52,15 @@ const MIME = {
 async function regenerateDashboard() {
   await execAsync('node generate-dashboard.mjs', { cwd: __dirname });
   return readFile(resolve(__dirname, 'output/dashboard.html'), 'utf-8');
+}
+
+async function syncDb() {
+  // Non-fatal — DB is a derived index. If sync fails, MD files are still canonical.
+  try {
+    await execAsync('node sync-db.mjs', { cwd: __dirname, timeout: 10000 });
+  } catch (e) {
+    console.error('sync-db warning:', e.message);
+  }
 }
 
 async function findReportPath(id) {
@@ -197,15 +214,38 @@ async function applyToJob(id) {
 }
 
 async function runScan() {
-  const { stdout } = await execAsync('node scan.mjs', {
+  const { stdout: scanOut } = await execAsync('node scan.mjs', {
     cwd: __dirname,
     maxBuffer: 10 * 1024 * 1024,
   });
   const num = (re) => {
-    const m = stdout.match(re);
+    const m = scanOut.match(re);
     return m ? parseInt(m[1], 10) : 0;
   };
-  // Parse the scan summary lines (see scan.mjs output)
+  const newOffers = num(/New offers added:\s+(\d+)/);
+
+  let evalOut = '';
+  let evalCompleted = 0;
+  let evalFailed = 0;
+  // Policy: every job added gets evaluated. Run auto-evaluate after scan.
+  // Skip if scan added zero (no new work) AND no leftover unchecked items.
+  // auto-evaluate handles its own dedup against existing reports.
+  try {
+    const res = await execAsync('node auto-evaluate.mjs', {
+      cwd: __dirname,
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: 30 * 60 * 1000,
+    });
+    evalOut = res.stdout;
+    const compMatch = evalOut.match(/Completed:\s+(\d+)\s+Failed:\s+(\d+)/);
+    if (compMatch) {
+      evalCompleted = parseInt(compMatch[1], 10);
+      evalFailed = parseInt(compMatch[2], 10);
+    }
+  } catch (e) {
+    evalOut = `auto-evaluate error: ${e.message}`;
+  }
+
   return {
     ok: true,
     companies: num(/Companies scanned:\s+(\d+)/),
@@ -213,8 +253,12 @@ async function runScan() {
     titleFiltered: num(/Filtered by title:\s+(\d+)/),
     locationFiltered: num(/Filtered by location:\s+(\d+)/),
     duplicates: num(/Duplicates:\s+(\d+)/),
-    newOffers: num(/New offers added:\s+(\d+)/),
-    summaryTail: stdout.split('\n').slice(-80).join('\n'),
+    newOffers,
+    evalCompleted,
+    evalFailed,
+    summaryTail: (scanOut.split('\n').slice(-40).join('\n')
+      + '\n--- auto-evaluate ---\n'
+      + evalOut.split('\n').slice(-40).join('\n')),
   };
 }
 
@@ -303,13 +347,21 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   try {
-    // GET / → regenerate + serve dashboard
+    // GET / → onboarding wizard if config missing, else dashboard
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+      const onboarding = getOnboardingStatus();
+      if (onboarding.needsOnboarding && url.searchParams.get('force') !== 'dashboard') {
+        res.writeHead(200, { 'Content-Type': MIME['.html'] });
+        res.end(renderWizardHTML());
+        return;
+      }
       let html = await regenerateDashboard();
       // Inject server-mode flag and apply-button JS into the page
       const inject = `
 <script>
   window.CAREER_OPS_SERVER = true;
+  // Hide the "you're viewing a static snapshot" banner — we're in server mode.
+  document.documentElement.classList.add('server-mode');
   window.applyToJob = async function(id, url) {
     const btn = document.querySelector('button[data-apply-id="' + id + '"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
@@ -367,28 +419,73 @@ const server = http.createServer(async (req, res) => {
   };
   window.scanForJobs = async function(btn) {
     const original = btn ? btn.textContent : '';
-    if (btn) { btn.disabled = true; btn.textContent = '🔍 Scanning…'; }
+    if (btn) { btn.disabled = true; btn.textContent = '🔍 Scanning + evaluating…'; }
     try {
       const resp = await fetch('/scan', { method: 'POST' });
       const data = await resp.json();
       if (!data.ok) throw new Error(data.error || 'Scan failed');
-      const msg = data.newOffers > 0
-        ? '✅ Scan complete!\\n\\nCompanies scanned: ' + data.companies +
-          '\\nNew openings: ' + data.newOffers +
-          '\\n\\nThe new URLs are queued in data/pipeline.md. To get them ' +
-          'evaluated (scored, with full reports), switch to Claude Code and ' +
-          'say: \"evaluate the new jobs\". The reports + dashboard will ' +
-          'update with each batch.'
-        : '✅ Scan complete — no new openings.\\n\\n' +
-          'Companies scanned: ' + data.companies + '\\n' +
-          'Total jobs found: ' + data.totalJobs + '\\n' +
-          'Filtered out by title/location: ' + (data.titleFiltered + data.locationFiltered) +
-          '\\nDuplicates already in your pipeline: ' + data.duplicates;
+      let msg = '✅ Scan complete\\n\\n' +
+        'Companies scanned: ' + data.companies + '\\n' +
+        'New openings: ' + data.newOffers + '\\n' +
+        'Duplicates already in pipeline: ' + data.duplicates;
+      if (data.evalCompleted > 0 || data.evalFailed > 0) {
+        msg += '\\n\\nAuto-evaluation:\\n' +
+          '  Completed: ' + data.evalCompleted + '\\n' +
+          '  Failed: ' + data.evalFailed;
+      }
+      if (data.evalCompleted > 0) msg += '\\n\\nDashboard updated. Reloading.';
       alert(msg);
+      if (data.evalCompleted > 0 || data.newOffers > 0) {
+        setTimeout(() => location.reload(), 300);
+      }
     } catch (err) {
       alert('Scan failed: ' + err.message);
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = original || '🔍 Scan for new jobs'; }
+    }
+  };
+  window.evaluateAll = async function(btn) {
+    const pendingCount = document.querySelectorAll('.card[data-tier="pending"]').length;
+    if (pendingCount === 0) { alert('No pending evaluations.'); return; }
+    const input = prompt('How many to evaluate? (Sonnet @ ~$0.25/eval)\\n\\nPending total: ' + pendingCount + '\\nDefault: 25', '25');
+    if (input === null) return;
+    const limit = Math.max(1, Math.min(500, parseInt(input, 10) || 25));
+    const estCost = (limit * 0.25).toFixed(2);
+    if (!confirm('Run ' + limit + ' evaluations on Sonnet?\\n\\nEstimated cost: ~$' + estCost + '\\nEstimated time: ~' + Math.ceil(limit * 180 / 6 / 60) + ' min (parallel=6)\\n\\nThis is a long-running request — keep the tab open.')) return;
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⚡ Evaluating ' + limit + '…'; }
+    try {
+      const resp = await fetch('/evaluate-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit })
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'Eval-all failed');
+      alert('✅ Done. Completed: ' + data.completed + '  Failed: ' + data.failed + '\\n\\nReloading dashboard.');
+      setTimeout(() => location.reload(), 400);
+    } catch (err) {
+      alert('Evaluate-all failed: ' + err.message);
+      if (btn) { btn.disabled = false; btn.textContent = original || '⚡ Evaluate all'; }
+    }
+  };
+  window.evaluateJob = async function(url, btn) {
+    if (!url) return;
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⚡ Evaluating…'; }
+    try {
+      const resp = await fetch('/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || ('Eval failed (completed=' + (data.completed || 0) + ', failed=' + (data.failed || 0) + ')'));
+      // Reload so the new evaluated card replaces the pending one
+      setTimeout(() => location.reload(), 300);
+    } catch (err) {
+      alert('Evaluate failed: ' + err.message);
+      if (btn) { btn.disabled = false; btn.textContent = original || '⚡ Evaluate'; }
     }
   };
   window.skipJob = async function(id) {
@@ -408,7 +505,9 @@ const server = http.createServer(async (req, res) => {
     }
   };
 </script>`;
-      html = html.replace('</body>', inject + '</body>');
+      // Use a function replacer so $-tokens (e.g. $' in the injected JS) are not
+      // interpreted as String.replace special patterns.
+      html = html.replace('</body>', () => inject + '</body>');
       res.writeHead(200, { 'Content-Type': MIME['.html'] });
       res.end(html);
       return;
@@ -418,6 +517,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/apply/')) {
       const id = url.pathname.split('/').pop();
       const result = await applyToJob(id);
+      await syncDb();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;
@@ -427,6 +527,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/unapply/')) {
       const id = url.pathname.split('/').pop();
       const result = await unapplyJob(id);
+      await syncDb();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;
@@ -436,6 +537,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/generate-pdf/')) {
       const id = url.pathname.split('/').pop();
       const result = await generatePdfForJob(id);
+      await syncDb();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;
@@ -453,6 +555,7 @@ const server = http.createServer(async (req, res) => {
       let reason = '';
       try { reason = (JSON.parse(body || '{}').reason || '').toString(); } catch {}
       const result = await rejectJob(id, reason);
+      await syncDb();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
       return;
@@ -461,8 +564,82 @@ const server = http.createServer(async (req, res) => {
     // POST /scan — run scan.mjs and return summary
     if (req.method === 'POST' && url.pathname === '/scan') {
       const result = await runScan();
+      await syncDb();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /evaluate-all — body: { limit } — run auto-evaluate --limit N for all unchecked
+    if (req.method === 'POST' && url.pathname === '/evaluate-all') {
+      let body = '';
+      await new Promise((res2, rej2) => {
+        req.on('data', chunk => body += chunk);
+        req.on('end', res2);
+        req.on('error', rej2);
+      });
+      let limit = 25;
+      try { limit = parseInt(JSON.parse(body || '{}').limit, 10) || 25; } catch {}
+      limit = Math.max(1, Math.min(500, limit));
+      try {
+        const { stdout } = await execAsync(
+          `node auto-evaluate.mjs --limit ${limit}`,
+          { cwd: __dirname, maxBuffer: 100 * 1024 * 1024, timeout: 120 * 60 * 1000 }
+        );
+        const compMatch = stdout.match(/Completed:\s+(\d+)\s+Failed:\s+(\d+)/);
+        const completed = compMatch ? parseInt(compMatch[1], 10) : 0;
+        const failed = compMatch ? parseInt(compMatch[2], 10) : 0;
+        await syncDb();
+        res.writeHead(200, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({
+          ok: true,
+          completed,
+          failed,
+          limit,
+          tail: stdout.split('\n').slice(-30).join('\n'),
+        }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // POST /evaluate — body: { url } — run auto-evaluate --url <URL>
+    if (req.method === 'POST' && url.pathname === '/evaluate') {
+      let body = '';
+      await new Promise((res2, rej2) => {
+        req.on('data', chunk => body += chunk);
+        req.on('end', res2);
+        req.on('error', rej2);
+      });
+      let targetUrl = '';
+      try { targetUrl = (JSON.parse(body || '{}').url || '').toString(); } catch {}
+      if (!targetUrl) {
+        res.writeHead(400, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({ ok: false, error: 'missing url' }));
+        return;
+      }
+      try {
+        const { stdout } = await execAsync(
+          `node auto-evaluate.mjs --url ${JSON.stringify(targetUrl)}`,
+          { cwd: __dirname, maxBuffer: 50 * 1024 * 1024, timeout: 10 * 60 * 1000 }
+        );
+        const compMatch = stdout.match(/Completed:\s+(\d+)\s+Failed:\s+(\d+)/);
+        const completed = compMatch ? parseInt(compMatch[1], 10) : 0;
+        const failed = compMatch ? parseInt(compMatch[2], 10) : 0;
+        await syncDb();
+        res.writeHead(200, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({
+          ok: completed > 0,
+          completed,
+          failed,
+          tail: stdout.split('\n').slice(-15).join('\n'),
+        }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
       return;
     }
 
@@ -478,8 +655,40 @@ const server = http.createServer(async (req, res) => {
       let reason = '';
       try { reason = (JSON.parse(body || '{}').reason || '').toString(); } catch {}
       const result = await skipJob(id, reason);
+      await syncDb();
       res.writeHead(200, { 'Content-Type': MIME['.json'] });
       res.end(JSON.stringify(result));
+      return;
+    }
+
+    // POST /onboarding/* — wizard endpoints
+    if (req.method === 'POST' && url.pathname.startsWith('/onboarding/')) {
+      let body = '';
+      await new Promise((res2, rej2) => {
+        req.on('data', chunk => body += chunk);
+        req.on('end', res2);
+        req.on('error', rej2);
+      });
+      let payload = {};
+      try { payload = JSON.parse(body || '{}'); } catch {}
+      const step = url.pathname.split('/').pop();
+      try {
+        if (step === 'cv') {
+          await writeCv(payload.content);
+        } else if (step === 'profile') {
+          await writeProfile(payload);
+        } else if (step === 'portals') {
+          await writePortals(payload);
+          await ensureUserProfileMd();
+        } else {
+          throw new Error(`Unknown onboarding step: ${step}`);
+        }
+        res.writeHead(200, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': MIME['.json'] });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
       return;
     }
 

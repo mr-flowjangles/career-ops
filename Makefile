@@ -54,10 +54,29 @@ docx: ## Generate ATS-clean Word .docx (output/cv-rob-rose-{date}.docx)
 all-resumes: pdf pdf-ats docx ## Generate all three resume formats from cv.md
 
 ##@ Job pipeline
-.PHONY: scan merge verify dedup normalize liveness
+.PHONY: scan scan-only auto-eval merge verify dedup normalize liveness sync-db db-stats db-rebuild
 
-scan: ## Scan portals for new job postings
+sync-db: ## Incrementally sync career-ops.db from MD source-of-truth files
+	@node sync-db.mjs
+
+db-rebuild: ## Drop and rebuild career-ops.db from scratch
+	@node sync-db.mjs --rebuild
+
+db-stats: ## Show career-ops.db row counts and status breakdown
+	@node sync-db.mjs --stats
+
+query: ## Run canned queries on career-ops.db (e.g. `make query VIEW=top`)
+	@node query.mjs $(VIEW) $(ARGS)
+
+scan: ## Scan portals + auto-evaluate any new URLs (policy: every added job gets evaluated)
 	@node scan.mjs
+	@node auto-evaluate.mjs
+
+scan-only: ## Scan portals only — skip auto-evaluation (drops URLs into pipeline.md for manual review)
+	@node scan.mjs
+
+auto-eval: ## Evaluate all unchecked URLs in data/pipeline.md
+	@node auto-evaluate.mjs
 
 merge: ## Merge batch/tracker-additions into data/applications.md
 	@node merge-tracker.mjs

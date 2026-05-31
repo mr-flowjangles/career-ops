@@ -69,6 +69,19 @@ function detectApi(company) {
     };
   }
 
+  // Workday (CXS API: /wday/cxs/{tenant}/{site}/jobs via POST)
+  // Matches https://{tenant}.wd{N}.myworkdayjobs.com/[locale/]{site}
+  const wdMatch = url.match(/^(https?:\/\/([^.]+)\.wd\d+\.myworkdayjobs\.com)\/(?:[a-z]{2}-[A-Z]{2}\/)?([^/?#]+)/);
+  if (wdMatch) {
+    const [matched, origin, tenant, site] = wdMatch;
+    return {
+      type: 'workday',
+      url: `${origin}/wday/cxs/${tenant}/${site}/jobs`,
+      origin,
+      referer: matched,  // original careers page URL — Workday needs this in headers
+    };
+  }
+
   return null;
 }
 
@@ -104,7 +117,17 @@ function parseLever(json, companyName) {
   }));
 }
 
-const PARSERS = { greenhouse: parseGreenhouse, ashby: parseAshby, lever: parseLever };
+function parseWorkday(json, companyName, api) {
+  const jobs = json.jobPostings || [];
+  return jobs.map(j => ({
+    title: j.title || '',
+    url: j.externalPath ? `${api.origin}${j.externalPath}` : '',
+    company: companyName,
+    location: j.locationsText || '',
+  }));
+}
+
+const PARSERS = { greenhouse: parseGreenhouse, ashby: parseAshby, lever: parseLever, workday: parseWorkday };
 
 // ── Fetch with timeout ──────────────────────────────────────────────
 
@@ -118,6 +141,62 @@ async function fetchJson(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Workday tenants are behind Cloudflare with bot-fingerprint checks. Sending
+// browser-like Origin/Referer/Sec-Fetch headers + a real Chrome UA makes the
+// request pass; without them, some tenants 400/422 even though the URL is right.
+// Page size is 20 — some tenants (Workiva) reject larger limits with HTTP 400.
+const WORKDAY_PAGE_LIMIT = 20;
+const WORKDAY_MAX_PAGES = 25;          // 25 × 20 = 500 jobs max per tenant
+const WORKDAY_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+async function fetchWorkdayPage(apiUrl, origin, referer, offset) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(apiUrl, {
+      signal: controller.signal,
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': WORKDAY_UA,
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': origin,
+        'Referer': referer,
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+      },
+      body: JSON.stringify({
+        appliedFacets: {},
+        limit: WORKDAY_PAGE_LIMIT,
+        offset,
+        searchText: '',
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchWorkdayPaginated(apiUrl, origin, referer) {
+  const all = [];
+  let offset = 0;
+  let total = Infinity;
+
+  for (let page = 0; page < WORKDAY_MAX_PAGES && offset < total; page++) {
+    const data = await fetchWorkdayPage(apiUrl, origin, referer, offset);
+    if (!data.jobPostings || data.jobPostings.length === 0) break;
+    all.push(...data.jobPostings);
+    total = data.total ?? all.length;
+    offset += data.jobPostings.length;
+  }
+
+  return { jobPostings: all };
 }
 
 // ── Title filter ────────────────────────────────────────────────────
@@ -317,10 +396,12 @@ async function main() {
   const errors = [];
 
   const tasks = targets.map(company => async () => {
-    const { type, url } = company._api;
+    const api = company._api;
     try {
-      const json = await fetchJson(url);
-      const jobs = PARSERS[type](json, company.name);
+      const json = api.type === 'workday'
+        ? await fetchWorkdayPaginated(api.url, api.origin, api.referer)
+        : await fetchJson(api.url);
+      const jobs = PARSERS[api.type](json, company.name, api);
       totalFound += jobs.length;
 
       for (const job of jobs) {
@@ -344,7 +425,7 @@ async function main() {
         // Mark as seen to avoid intra-scan dupes
         seenUrls.add(job.url);
         seenCompanyRoles.add(key);
-        newOffers.push({ ...job, source: `${type}-api` });
+        newOffers.push({ ...job, source: `${api.type}-api` });
       }
     } catch (err) {
       errors.push({ company: company.name, error: err.message });

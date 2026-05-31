@@ -34,6 +34,10 @@ modes/_profile.md
 .resolved-prompt-*
 node_modules/
 bun.lock
+career-ops.db
+career-ops.db-journal
+career-ops.db-wal
+career-ops.db-shm
 
 # OS
 .DS_Store
